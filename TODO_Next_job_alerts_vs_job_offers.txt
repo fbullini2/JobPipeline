@@ -1,0 +1,4 @@
+please note 2 different concepts; JobAlertEmail and JobOffer; One JobAlertEmail can contain 1 or more JobOffers; The alert email contains
+  often only few information about some jobs, often in the title of the mail it's already stated that there are more jobs offers in that
+  email, but it's NOT a strict rule and often they doesn't contain the name of the company that need the job position, but only the
+  recuiterCompany (liek Cadremploi) that sent the JobAlertEmail; please make this 2 concept very distinct, with the related structures;
