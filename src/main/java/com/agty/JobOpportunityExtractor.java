@@ -487,7 +487,7 @@ public class JobOpportunityExtractor {
             }
 
             if (opportunities.size() > displayCount) {
-                System.out.println("\n  ... and " + (opportunities.size() - displayCount) + " more opportunities");
+                System.out.println("\n  ... and " + (opportunities.size() - displayCount) + " more opportunities to be checked, increase the LIMIT");
             }
 
         } catch (Exception e) {
