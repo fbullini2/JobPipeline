@@ -1,14 +1,39 @@
 package com.agty;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.logging.Logger;
 
 /**
  * Entity representing a structured job opportunity extracted from an email.
  * This is the final structured representation of a job offer.
  */
 public class JobOpportunity {
+    private static final Logger logger = Logger.getLogger(JobOpportunity.class.getName());
+
     private String title;
-    private String link;
+
+    // Job portal information
+    @JsonProperty("job_portal_name")
+    private String jobPortalName;  // "Cadremploi", "LinkedIn", "Indeed", "Apec", "HelloWork", etc.
+
+    // URL fields - categorized by purpose and source
+    @JsonProperty("job_offer_url_apply_portal")
+    private String jobOfferURLForApplyOnJobPortal;
+
+    @JsonProperty("job_offer_url_apply_company")
+    private String jobOfferURLForApplyOnCompanySite;
+
+    @JsonProperty("job_offer_url_description_portal")
+    private String jobOfferURLForDescriptionOnJobPortal;
+
+    @JsonProperty("job_offer_url_description_company")
+    private String jobOfferURLForDescriptionOnCompanySite;
+
+    // URL reference type - indicates if URL is a final direct link or expired job reference
+    @JsonProperty("url_reference_type")
+    private String urlReferenceType;  // "DIRECT" (default) or "NOT_FINAL_REFERENCE" (expired job)
+
     private String company;
 
     @JsonProperty("fit_score")
@@ -66,12 +91,90 @@ public class JobOpportunity {
         this.title = title;
     }
 
+    /**
+     * DEPRECATED: For backward compatibility only.
+     * Returns the first available URL in order of preference.
+     * This method logs a warning when called.
+     *
+     * @deprecated Use specific URL getters instead:
+     *             getJobOfferURLForApplyOnJobPortal(),
+     *             getJobOfferURLForApplyOnCompanySite(),
+     *             getJobOfferURLForDescriptionOnJobPortal(),
+     *             getJobOfferURLForDescriptionOnCompanySite()
+     */
+    @Deprecated
+    @JsonIgnore  // Prevent Jackson from serializing this deprecated field
     public String getLink() {
-        return link;
+        logger.warning("getLink() is DEPRECATED - using backward compatibility mode. " +
+                       "Please use specific URL getters instead.");
+        // Return first non-null URL in priority order
+        if (jobOfferURLForApplyOnJobPortal != null) return jobOfferURLForApplyOnJobPortal;
+        if (jobOfferURLForApplyOnCompanySite != null) return jobOfferURLForApplyOnCompanySite;
+        if (jobOfferURLForDescriptionOnJobPortal != null) return jobOfferURLForDescriptionOnJobPortal;
+        if (jobOfferURLForDescriptionOnCompanySite != null) return jobOfferURLForDescriptionOnCompanySite;
+        return null;
     }
 
+    /**
+     * DEPRECATED: For backward compatibility only.
+     * Sets the description URL on portal by default.
+     *
+     * @deprecated Use specific URL setters instead
+     */
+    @Deprecated
+    @JsonIgnore  // Prevent Jackson from deserializing this deprecated field
     public void setLink(String link) {
-        this.link = link;
+        logger.warning("setLink() is DEPRECATED - using backward compatibility mode. " +
+                       "Setting jobOfferURLForDescriptionOnJobPortal instead.");
+        this.jobOfferURLForDescriptionOnJobPortal = link;
+    }
+
+    public String getJobPortalName() {
+        return jobPortalName;
+    }
+
+    public void setJobPortalName(String jobPortalName) {
+        this.jobPortalName = jobPortalName;
+    }
+
+    public String getJobOfferURLForApplyOnJobPortal() {
+        return jobOfferURLForApplyOnJobPortal;
+    }
+
+    public void setJobOfferURLForApplyOnJobPortal(String jobOfferURLForApplyOnJobPortal) {
+        this.jobOfferURLForApplyOnJobPortal = jobOfferURLForApplyOnJobPortal;
+    }
+
+    public String getJobOfferURLForApplyOnCompanySite() {
+        return jobOfferURLForApplyOnCompanySite;
+    }
+
+    public void setJobOfferURLForApplyOnCompanySite(String jobOfferURLForApplyOnCompanySite) {
+        this.jobOfferURLForApplyOnCompanySite = jobOfferURLForApplyOnCompanySite;
+    }
+
+    public String getJobOfferURLForDescriptionOnJobPortal() {
+        return jobOfferURLForDescriptionOnJobPortal;
+    }
+
+    public void setJobOfferURLForDescriptionOnJobPortal(String jobOfferURLForDescriptionOnJobPortal) {
+        this.jobOfferURLForDescriptionOnJobPortal = jobOfferURLForDescriptionOnJobPortal;
+    }
+
+    public String getJobOfferURLForDescriptionOnCompanySite() {
+        return jobOfferURLForDescriptionOnCompanySite;
+    }
+
+    public void setJobOfferURLForDescriptionOnCompanySite(String jobOfferURLForDescriptionOnCompanySite) {
+        this.jobOfferURLForDescriptionOnCompanySite = jobOfferURLForDescriptionOnCompanySite;
+    }
+
+    public String getUrlReferenceType() {
+        return urlReferenceType;
+    }
+
+    public void setUrlReferenceType(String urlReferenceType) {
+        this.urlReferenceType = urlReferenceType;
     }
 
     public String getCompany() {
@@ -212,7 +315,7 @@ public class JobOpportunity {
 
     @Override
     public String toString() {
-        return String.format("JobOpportunity{title='%s', company='%s', location='%s', fitScore=%.2f}",
-                title, company, location, fitScore);
+        return String.format("JobOpportunity{title='%s', company='%s', location='%s', portal='%s', fitScore=%.2f}",
+                title, company, location, jobPortalName, fitScore);
     }
 }

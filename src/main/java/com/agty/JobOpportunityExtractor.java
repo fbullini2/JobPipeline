@@ -1,6 +1,9 @@
 package com.agty;
 
 import com.agty.GmailEmailProcessor02.*;
+import com.agty.urlextractor.URLExtractorRegistry;
+import com.agty.urlextractor.URLExtractionResult;
+import com.agty.urlextractor.URLValidator;
 import com.agty.utils.LLMCostCalculator;
 import com.agty.utils.LLMUsageInfo;
 import com.agty.utils.OpenAiRESTApiCaller;
@@ -28,6 +31,7 @@ public class JobOpportunityExtractor {
     private final String modelName;
     private final ObjectMapper mapper;
     private final LLMCostCalculator.CostSummary costSummary;
+    private final URLExtractorRegistry urlExtractorRegistry;
 
     public JobOpportunityExtractor(String agentId, String modelName) {
         this.agentId = agentId;
@@ -35,6 +39,9 @@ public class JobOpportunityExtractor {
         this.mapper = new ObjectMapper();
         this.mapper.enable(SerializationFeature.INDENT_OUTPUT);
         this.costSummary = new LLMCostCalculator.CostSummary();
+        this.urlExtractorRegistry = new URLExtractorRegistry();
+        System.out.println("  ✓ Initialized URL Extractor Registry with " +
+                urlExtractorRegistry.getExtractorCount() + " specialized extractor(s)");
     }
 
     /**
@@ -210,16 +217,60 @@ public class JobOpportunityExtractor {
     }
 
     /**
-     * Extract JobOpportunities from a single email using LLM
+     * Extract JobOpportunities from a single email using URL extraction + LLM
      */
     private List<JobOpportunity> extractFromEmail(EmailInfo email) {
-        // Build the system prompt
+        // STEP 1: Try direct HTML parsing for Cadremploi (regex extraction)
+        if (email.getFrom() != null && email.getFrom().toLowerCase().contains("offres@alertes.cadremploi.fr")) {
+            System.out.println("  → Detected Cadremploi email - attempting REGEX extraction...");
+
+            com.agty.urlextractor.CadreMploiURLExtractor cadreMploiExtractor =
+                new com.agty.urlextractor.CadreMploiURLExtractor();
+
+            List<JobOpportunity> regexOpportunities = cadreMploiExtractor.extractJobOpportunities(
+                email.getContent(),
+                email.getSubject()
+            );
+
+            if (regexOpportunities != null && !regexOpportunities.isEmpty()) {
+                System.out.println("  ✓ REGEX extraction successful! Extracted " + regexOpportunities.size() + " jobs");
+                System.out.println("  ℹ Skipping LLM call (faster & cheaper)");
+
+                // Add source email metadata to each opportunity
+                for (JobOpportunity opportunity : regexOpportunities) {
+                    opportunity.setSourceEmailSubject(email.getSubject());
+                    opportunity.setSourceEmailFrom(email.getFrom());
+                    opportunity.setSourceEmailDate(email.getSentDate() != null ? email.getSentDate().toString() : null);
+                }
+
+                return regexOpportunities;
+            } else {
+                System.out.println("  ⚠ REGEX extraction failed or returned no results");
+                System.out.println("  → Falling back to LLM extraction...");
+            }
+        }
+
+        // STEP 2: Pre-process URL extraction using regex (for other sources)
+        System.out.println("  → Pre-processing: Attempting URL extraction...");
+        URLExtractionResult urlExtractionResult = urlExtractorRegistry.extractURLs(
+                email.getFrom(),
+                email.getSubject(),
+                email.getContent()
+        );
+
+        // Store portal name even if URL extraction failed (for portals that delegate to LLM)
+        String detectedPortalName = null;
+        if (urlExtractionResult != null && urlExtractionResult.getJobPortalName() != null) {
+            detectedPortalName = urlExtractionResult.getJobPortalName();
+        }
+
+        // STEP 3: Build the system prompt
         String systemPrompt = buildExtractionSystemPrompt();
 
         // Build the user prompt with email content
         String userPrompt = buildExtractionUserPrompt(email);
 
-        // Call LLM with usage tracking
+        // STEP 4: Call LLM with usage tracking
         System.out.println("  → Calling LLM for extraction...");
         LLMUsageInfo usageInfo = OpenAiRESTApiCaller.callerWithUsage(
                 agentId,
@@ -228,7 +279,7 @@ public class JobOpportunityExtractor {
                 userPrompt,
                 "JobOpportunityExtractor",
                 0.1, // Low temperature for consistent extraction
-                2000 // Max tokens for response
+                6000 // Max tokens for response (increased to handle multiple offers with URLs from HTML emails)
         );
 
         // Track cost
@@ -240,15 +291,29 @@ public class JobOpportunityExtractor {
             return null;
         }
 
-        // Parse LLM response into List of JobOpportunity
+        // STEP 5: Parse LLM response into List of JobOpportunity
         try {
             List<JobOpportunity> opportunities = parseLLMResponse(llmResponse);
 
-            // Add source email metadata to each opportunity
+            // STEP 6: Post-process - merge URL extraction results and validate
             for (JobOpportunity opportunity : opportunities) {
+                // Add source email metadata
                 opportunity.setSourceEmailSubject(email.getSubject());
                 opportunity.setSourceEmailFrom(email.getFrom());
                 opportunity.setSourceEmailDate(email.getSentDate() != null ? email.getSentDate().toString() : null);
+
+                // Set portal name if detected (even if URL extraction failed)
+                if (detectedPortalName != null && opportunity.getJobPortalName() == null) {
+                    opportunity.setJobPortalName(detectedPortalName);
+                }
+
+                // Merge URL extraction results (if regex succeeded)
+                if (urlExtractionResult != null && urlExtractionResult.isExtractionSuccess()) {
+                    mergeURLExtractionResults(opportunity, urlExtractionResult);
+                }
+
+                // Validate and clean URLs
+                validateAndCleanURLs(opportunity);
             }
 
             return opportunities;
@@ -260,6 +325,67 @@ public class JobOpportunityExtractor {
     }
 
     /**
+     * Merge URL extraction results from regex into the JobOpportunity
+     * Regex results take precedence over LLM results for known sources
+     */
+    private void mergeURLExtractionResults(JobOpportunity opportunity, URLExtractionResult urlResult) {
+        // Portal name from regex takes precedence
+        if (urlResult.getJobPortalName() != null && opportunity.getJobPortalName() == null) {
+            opportunity.setJobPortalName(urlResult.getJobPortalName());
+        }
+
+        // Merge URLs - prefer regex results for known portals
+        if (urlResult.getJobOfferURLForApplyOnJobPortal() != null) {
+            opportunity.setJobOfferURLForApplyOnJobPortal(urlResult.getJobOfferURLForApplyOnJobPortal());
+        }
+        if (urlResult.getJobOfferURLForApplyOnCompanySite() != null) {
+            opportunity.setJobOfferURLForApplyOnCompanySite(urlResult.getJobOfferURLForApplyOnCompanySite());
+        }
+        if (urlResult.getJobOfferURLForDescriptionOnJobPortal() != null) {
+            opportunity.setJobOfferURLForDescriptionOnJobPortal(urlResult.getJobOfferURLForDescriptionOnJobPortal());
+        }
+        if (urlResult.getJobOfferURLForDescriptionOnCompanySite() != null) {
+            opportunity.setJobOfferURLForDescriptionOnCompanySite(urlResult.getJobOfferURLForDescriptionOnCompanySite());
+        }
+    }
+
+    /**
+     * Validate all URLs in the JobOpportunity and remove invalid ones
+     */
+    private void validateAndCleanURLs(JobOpportunity opportunity) {
+        // Validate and clean each URL field
+        opportunity.setJobOfferURLForApplyOnJobPortal(
+                validateURL(opportunity.getJobOfferURLForApplyOnJobPortal(), "Apply on Portal"));
+
+        opportunity.setJobOfferURLForApplyOnCompanySite(
+                validateURL(opportunity.getJobOfferURLForApplyOnCompanySite(), "Apply on Company"));
+
+        opportunity.setJobOfferURLForDescriptionOnJobPortal(
+                validateURL(opportunity.getJobOfferURLForDescriptionOnJobPortal(), "Description on Portal"));
+
+        opportunity.setJobOfferURLForDescriptionOnCompanySite(
+                validateURL(opportunity.getJobOfferURLForDescriptionOnCompanySite(), "Description on Company"));
+    }
+
+    /**
+     * Validate a single URL and return it if valid, or null if invalid
+     */
+    private String validateURL(String url, String fieldName) {
+        if (url == null || url.trim().isEmpty()) {
+            return null;
+        }
+
+        URLValidator.ValidationResult validation = URLValidator.validate(url);
+        if (!validation.isValid()) {
+            System.err.println("  ⚠ Invalid URL in '" + fieldName + "' field: " + validation.getErrorMessage());
+            System.err.println("    Rejected URL: " + truncate(url, 80));
+            return null;  // Remove invalid URL
+        }
+
+        return url.trim();
+    }
+
+    /**
      * Build the system prompt for LLM extraction
      */
     private String buildExtractionSystemPrompt() {
@@ -267,8 +393,19 @@ public class JobOpportunityExtractor {
                 "information from job offer emails and return it in JSON format.\n\n" +
                 "Extract the following fields from the email:\n" +
                 "- title: The job title/position\n" +
-                "- link: URL to apply or view the job (if mentioned)\n" +
                 "- company: Company name\n" +
+                "- job_portal_name: Name of job portal (Cadremploi, LinkedIn, Indeed, Apec, HelloWork, etc.) or null if direct from company\n" +
+                "- job_offer_url_apply_portal: URL to APPLY/SUBMIT APPLICATION on the job portal (intermediary site)\n" +
+                "- job_offer_url_apply_company: URL to APPLY/SUBMIT APPLICATION on the company's own website\n" +
+                "- job_offer_url_description_portal: URL to VIEW/READ job description on the job portal\n" +
+                "- job_offer_url_description_company: URL to VIEW/READ job description on company's website\n\n" +
+                "URL Classification Guidelines:\n" +
+                "  - 'Apply' URLs: Allow submitting CV/application, typically have 'apply', 'postuler', 'candidater' in URL or button text\n" +
+                "  - 'Description' URLs: Only show job information, typically have 'voir', 'view', 'detail', 'offre' in URL or button text\n" +
+                "  - 'Portal' URLs: On intermediary sites (Cadremploi, LinkedIn, Indeed, etc.)\n" +
+                "  - 'Company' URLs: On the actual employer's website (company domain)\n" +
+                "  - If you're unsure whether a URL is for apply or description, prefer using the description field\n" +
+                "  - Use null for missing URLs\n\n" +
                 "- fit_score: Your assessment of how good this opportunity is (0.0 to 10.0)\n" +
                 "- location: Job location (city, country, or 'Remote')\n" +
                 "- salary: Salary range if mentioned\n" +
@@ -282,9 +419,9 @@ public class JobOpportunityExtractor {
                 "- team_size_to_manage: Size of team to manage if mentioned\n" +
                 "- additional_experience: Additional experience requirements\n" +
                 "- work_languages: Required languages for work\n\n" +
-                "- work_languages: Required languages for work\n\n" +
-                "Return a JSON Object (if single opportunity) or a JSON Array (if multiple opportunities) containing these fields. "
-                +
+                "IMPORTANT: If the email contains multiple job offers, return a JSON Array with one object per offer. " +
+                "Each offer should have its specific URLs properly classified.\n\n" +
+                "Return a JSON Object (if single opportunity) or a JSON Array (if multiple opportunities) containing these fields. " +
                 "Use null for missing information. Do not include any explanatory text, only the JSON.";
     }
 
@@ -293,26 +430,47 @@ public class JobOpportunityExtractor {
      */
     private String buildExtractionUserPrompt(EmailInfo email) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("Extract job opportunity information from this email:\n\n");
+
+        // Check if content is HTML
+        String content = email.getContent();
+        boolean isHtml = content != null && content.trim().startsWith("<!DOCTYPE") ||
+                         (content != null && content.contains("<html"));
+
+        if (isHtml) {
+            prompt.append("Extract job opportunity information from this HTML email.\n");
+            prompt.append("IMPORTANT: The email content is in HTML format. Parse the HTML to extract:\n");
+            prompt.append("- Job titles (look for heading text, job names)\n");
+            prompt.append("- Company names\n");
+            prompt.append("- All URLs (especially 'Voir l'offre' / 'View offer' links)\n");
+            prompt.append("- Ignore CSS styles, DOCTYPE, meta tags, and formatting elements\n\n");
+        } else {
+            prompt.append("Extract job opportunity information from this email:\n\n");
+        }
 
         // Include email metadata
         prompt.append("Email Subject: ").append(email.getSubject()).append("\n");
         prompt.append("From: ").append(email.getFrom()).append("\n\n");
 
-        // Include email content (limit to first 10000 chars to avoid token limits)
-        String content = email.getContent();
+        // Include email content (limit to avoid token limits)
+        // For HTML emails, allow much more content to capture all job listings
+        // HTML emails from job portals can be large (80-100KB) with multiple offers
+        int maxLength = isHtml ? 80000 : 10000;
+
         if (content != null) {
-            if (content.length() > 10000) {
+            if (content.length() > maxLength) {
                 prompt.append("Email Content (truncated):\n");
-                prompt.append(content.substring(0, 10000));
-                prompt.append("\n\n[...content truncated...]");
+                prompt.append(content.substring(0, maxLength));
+                prompt.append("\n\n[...content truncated at ").append(maxLength).append(" characters...]");
             } else {
                 prompt.append("Email Content:\n");
                 prompt.append(content);
             }
         }
 
-        prompt.append("\n\nExtract the job opportunity information and return as JSON.");
+        prompt.append("\n\nExtract ALL job opportunities from this email and return as JSON.");
+        if (isHtml) {
+            prompt.append("\nRemember: Parse the HTML carefully to find ALL job listings in the email.");
+        }
 
         return prompt.toString();
     }
@@ -343,14 +501,18 @@ public class JobOpportunityExtractor {
             if (cleanedJson.startsWith("[")) {
                 // Parse as Array
                 if (!cleanedJson.endsWith("]")) {
-                    throw new IOException("Invalid JSON array structure - starts with [ but doesn't end with ]");
+                    throw new IOException("Invalid JSON array structure - starts with [ but doesn't end with ]. " +
+                            "This likely means the LLM response was truncated. Try increasing max_tokens parameter. " +
+                            "Response length: " + cleanedJson.length() + " chars");
                 }
                 return mapper.readValue(cleanedJson, new TypeReference<List<JobOpportunity>>() {
                 });
             } else if (cleanedJson.startsWith("{")) {
                 // Parse as Single Object
                 if (!cleanedJson.endsWith("}")) {
-                    throw new IOException("Invalid JSON object structure - starts with { but doesn't end with }");
+                    throw new IOException("Invalid JSON object structure - starts with { but doesn't end with }. " +
+                            "This likely means the LLM response was truncated. Try increasing max_tokens parameter. " +
+                            "Response length: " + cleanedJson.length() + " chars");
                 }
                 JobOpportunity opp = mapper.readValue(cleanedJson, JobOpportunity.class);
                 List<JobOpportunity> list = new ArrayList<>();
@@ -362,12 +524,14 @@ public class JobOpportunityExtractor {
 
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             System.err.println("  ✗ JSON Processing Error: " + e.getMessage());
-            System.err.println("  Response preview: " + truncate(llmResponse, 300));
+            System.err.println("  Response length: " + llmResponse.length() + " characters");
+            System.err.println("  Response preview: " + truncate(llmResponse, 500));
             throw new IOException("Failed to parse JSON response: " + e.getMessage(), e);
         } catch (Exception e) {
             System.err.println("  ✗ Unexpected error parsing response: " + e.getClass().getName());
             System.err.println("  Error message: " + e.getMessage());
-            System.err.println("  Response preview: " + truncate(llmResponse, 300));
+            System.err.println("  Response length: " + llmResponse.length() + " characters");
+            System.err.println("  Response preview: " + truncate(llmResponse, 500));
             throw new IOException("Unexpected error during JSON parsing: " + e.getMessage(), e);
         }
     }
