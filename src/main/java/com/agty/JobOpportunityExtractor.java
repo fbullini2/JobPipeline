@@ -39,7 +39,8 @@ public class JobOpportunityExtractor {
 
     /**
      * Extract job opportunities from the emails JSON file
-     * @param inputFilePath Path to job_opportunities_emails.json
+     * 
+     * @param inputFilePath  Path to job_opportunities_emails.json
      * @param outputFilePath Path where to save job_opportunities.json
      * @return List of extracted JobOpportunity objects
      */
@@ -95,27 +96,29 @@ public class JobOpportunityExtractor {
             }
 
             try {
-                JobOpportunity opportunity = extractFromEmail(email);
-                if (opportunity != null) {
-                    jobOpportunities.add(opportunity);
+                List<JobOpportunity> opportunities = extractFromEmail(email);
+                if (opportunities != null && !opportunities.isEmpty()) {
+                    jobOpportunities.addAll(opportunities);
                     processedEmails.add(emailKey);
                     successful++;
-                    System.out.println("✓ Extracted: " + truncate(opportunity.getTitle(), 50));
-                    System.out.println("  Company: " + opportunity.getCompany());
-                    System.out.println("  Location: " + opportunity.getLocation());
+                    System.out.println("✓ Extracted " + opportunities.size() + " opportunity(ies):");
+                    for (JobOpportunity opp : opportunities) {
+                        System.out.println("  - " + truncate(opp.getTitle(), 50));
+                        System.out.println("    Company: " + opp.getCompany());
+                        System.out.println("    Location: " + opp.getLocation());
+                    }
 
                     // INCREMENTAL SAVE: Save after each successful extraction
                     saveJobOpportunitiesToJson(jobOpportunities, outputFilePath);
                     System.out.println("  💾 Saved to file (incremental)");
                 } else {
                     failed++;
-                    System.out.println("✗ Failed to extract job opportunity");
+                    System.out.println("✗ Failed to extract job opportunity (empty result)");
                     errors.add(new ErrorDetail(
-                        email.getSubject(),
-                        email.getFrom(),
-                        "LLM returned null or empty response",
-                        "ExtractionFailure"
-                    ));
+                            email.getSubject(),
+                            email.getFrom(),
+                            "LLM returned null or empty response",
+                            "ExtractionFailure"));
                 }
             } catch (NoSuchMethodError e) {
                 failed++;
@@ -124,22 +127,20 @@ public class JobOpportunityExtractor {
                 System.err.println("  Please rebuild the project: mvn clean install");
                 System.err.println("  Continuing with next email...");
                 errors.add(new ErrorDetail(
-                    email.getSubject(),
-                    email.getFrom(),
-                    "Jackson library version conflict: " + e.getMessage(),
-                    "DependencyError"
-                ));
+                        email.getSubject(),
+                        email.getFrom(),
+                        "Jackson library version conflict: " + e.getMessage(),
+                        "DependencyError"));
             } catch (Exception e) {
                 failed++;
                 System.err.println("✗ Error processing email: " + e.getClass().getSimpleName());
                 System.err.println("  Message: " + e.getMessage());
                 System.err.println("  Continuing with next email...");
                 errors.add(new ErrorDetail(
-                    email.getSubject(),
-                    email.getFrom(),
-                    e.getMessage(),
-                    e.getClass().getSimpleName()
-                ));
+                        email.getSubject(),
+                        email.getFrom(),
+                        e.getMessage(),
+                        e.getClass().getSimpleName()));
                 // Only print stack trace in verbose mode to avoid cluttering output
                 if (System.getProperty("verbose") != null) {
                     e.printStackTrace();
@@ -209,9 +210,9 @@ public class JobOpportunityExtractor {
     }
 
     /**
-     * Extract a JobOpportunity from a single email using LLM
+     * Extract JobOpportunities from a single email using LLM
      */
-    private JobOpportunity extractFromEmail(EmailInfo email) {
+    private List<JobOpportunity> extractFromEmail(EmailInfo email) {
         // Build the system prompt
         String systemPrompt = buildExtractionSystemPrompt();
 
@@ -226,8 +227,8 @@ public class JobOpportunityExtractor {
                 systemPrompt,
                 userPrompt,
                 "JobOpportunityExtractor",
-                0.1,  // Low temperature for consistent extraction
-                2000  // Max tokens for response
+                0.1, // Low temperature for consistent extraction
+                2000 // Max tokens for response
         );
 
         // Track cost
@@ -239,20 +240,21 @@ public class JobOpportunityExtractor {
             return null;
         }
 
-        // Parse LLM response into JobOpportunity
+        // Parse LLM response into List of JobOpportunity
         try {
-            JobOpportunity opportunity = parseLLMResponse(llmResponse);
+            List<JobOpportunity> opportunities = parseLLMResponse(llmResponse);
 
-            // Add source email metadata
-            opportunity.setSourceEmailSubject(email.getSubject());
-            opportunity.setSourceEmailFrom(email.getFrom());
-            opportunity.setSourceEmailDate(email.getSentDate() != null ?
-                    email.getSentDate().toString() : null);
+            // Add source email metadata to each opportunity
+            for (JobOpportunity opportunity : opportunities) {
+                opportunity.setSourceEmailSubject(email.getSubject());
+                opportunity.setSourceEmailFrom(email.getFrom());
+                opportunity.setSourceEmailDate(email.getSentDate() != null ? email.getSentDate().toString() : null);
+            }
 
-            return opportunity;
+            return opportunities;
         } catch (Exception e) {
             System.err.println("  ✗ Error parsing LLM response: " + e.getMessage());
-            System.err.println("  LLM Response: " + truncate(llmResponse, 200));
+            System.err.println("  LLM Response (preview): " + truncate(llmResponse, 200));
             return null;
         }
     }
@@ -280,8 +282,10 @@ public class JobOpportunityExtractor {
                 "- team_size_to_manage: Size of team to manage if mentioned\n" +
                 "- additional_experience: Additional experience requirements\n" +
                 "- work_languages: Required languages for work\n\n" +
-                "Return ONLY a valid JSON object with these fields. Use null for missing information. " +
-                "Do not include any explanatory text, only the JSON object.";
+                "- work_languages: Required languages for work\n\n" +
+                "Return a JSON Object (if single opportunity) or a JSON Array (if multiple opportunities) containing these fields. "
+                +
+                "Use null for missing information. Do not include any explanatory text, only the JSON.";
     }
 
     /**
@@ -314,30 +318,48 @@ public class JobOpportunityExtractor {
     }
 
     /**
-     * Parse LLM JSON response into JobOpportunity object
+     * Parse LLM JSON response into List of JobOpportunity objects.
+     * Handles both single JSON object and JSON array.
+     * Robustly strips Markdown code blocks.
      */
-    private JobOpportunity parseLLMResponse(String llmResponse) throws IOException {
+    private List<JobOpportunity> parseLLMResponse(String llmResponse) throws IOException {
         try {
-            // Clean the response - remove markdown code blocks if present
+            // 1. Robust Markdown Stripping using Regex
+            // Matches ```json ... ``` or just ``` ... ``` or strictly the content inside
             String cleanedJson = llmResponse.trim();
-            if (cleanedJson.startsWith("```json")) {
-                cleanedJson = cleanedJson.substring(7);
+
+            // Remove ```json (case insensitive) at start
+            if (cleanedJson.matches("(?s)^```(?i:json)?.*")) {
+                cleanedJson = cleanedJson.replaceFirst("(?s)^```(?i:json)?", "");
             }
-            if (cleanedJson.startsWith("```")) {
-                cleanedJson = cleanedJson.substring(3);
+            // Remove trailing ```
+            if (cleanedJson.matches("(?s).*```$")) {
+                cleanedJson = cleanedJson.substring(0, cleanedJson.lastIndexOf("```"));
             }
-            if (cleanedJson.endsWith("```")) {
-                cleanedJson = cleanedJson.substring(0, cleanedJson.length() - 3);
-            }
+
             cleanedJson = cleanedJson.trim();
 
-            // Validate JSON structure before parsing
-            if (!cleanedJson.startsWith("{") || !cleanedJson.endsWith("}")) {
-                throw new IOException("Invalid JSON structure - response doesn't start with { or end with }");
+            // 2. Determine if Array or Object
+            if (cleanedJson.startsWith("[")) {
+                // Parse as Array
+                if (!cleanedJson.endsWith("]")) {
+                    throw new IOException("Invalid JSON array structure - starts with [ but doesn't end with ]");
+                }
+                return mapper.readValue(cleanedJson, new TypeReference<List<JobOpportunity>>() {
+                });
+            } else if (cleanedJson.startsWith("{")) {
+                // Parse as Single Object
+                if (!cleanedJson.endsWith("}")) {
+                    throw new IOException("Invalid JSON object structure - starts with { but doesn't end with }");
+                }
+                JobOpportunity opp = mapper.readValue(cleanedJson, JobOpportunity.class);
+                List<JobOpportunity> list = new ArrayList<>();
+                list.add(opp);
+                return list;
+            } else {
+                throw new IOException("Invalid JSON structure - doesn't start with { or [");
             }
 
-            // Parse JSON to JobOpportunity
-            return mapper.readValue(cleanedJson, JobOpportunity.class);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             System.err.println("  ✗ JSON Processing Error: " + e.getMessage());
             System.err.println("  Response preview: " + truncate(llmResponse, 300));
@@ -359,7 +381,8 @@ public class JobOpportunityExtractor {
             throw new IOException("Input file not found: " + filePath);
         }
 
-        return mapper.readValue(inputFile, new TypeReference<List<EmailInfo>>() {});
+        return mapper.readValue(inputFile, new TypeReference<List<EmailInfo>>() {
+        });
     }
 
     /**
@@ -374,7 +397,8 @@ public class JobOpportunityExtractor {
 
         try {
             List<JobOpportunity> existing = mapper.readValue(outputFile,
-                new TypeReference<List<JobOpportunity>>() {});
+                    new TypeReference<List<JobOpportunity>>() {
+                    });
             return existing;
         } catch (IOException e) {
             System.err.println("Warning: Could not load existing opportunities from " + filePath);
@@ -391,7 +415,8 @@ public class JobOpportunityExtractor {
         saveJobOpportunitiesToJson(opportunities, outputFilePath, false);
     }
 
-    private void saveJobOpportunitiesToJson(List<JobOpportunity> opportunities, String outputFilePath, boolean verbose) {
+    private void saveJobOpportunitiesToJson(List<JobOpportunity> opportunities, String outputFilePath,
+            boolean verbose) {
         try {
             File outputFile = new File(outputFilePath);
 
@@ -420,8 +445,10 @@ public class JobOpportunityExtractor {
      * Utility method to truncate strings for display
      */
     private String truncate(String str, int maxLength) {
-        if (str == null) return "null";
-        if (str.length() <= maxLength) return str;
+        if (str == null)
+            return "null";
+        if (str.length() <= maxLength)
+            return str;
         return str.substring(0, maxLength - 3) + "...";
     }
 
@@ -430,7 +457,7 @@ public class JobOpportunityExtractor {
      */
     public static void main(String[] args) {
         String agentId = "JobOpportunityExtractor_001";
-        String modelName = "gpt-4o-mini";  // Use cost-effective model for extraction
+        String modelName = "gpt-4o-mini"; // Use cost-effective model for extraction
 
         String inputPath = System.getProperty("user.dir") + "/tools_data/job_opportunities_emails.json";
         String outputPath = System.getProperty("user.dir") + "/tools_data/job_opportunities.json";
@@ -486,8 +513,10 @@ public class JobOpportunityExtractor {
     }
 
     private static String truncateStatic(String str, int maxLength) {
-        if (str == null) return "null";
-        if (str.length() <= maxLength) return str;
+        if (str == null)
+            return "null";
+        if (str.length() <= maxLength)
+            return str;
         return str.substring(0, maxLength - 3) + "...";
     }
 
